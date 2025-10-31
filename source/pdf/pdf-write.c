@@ -70,6 +70,9 @@ typedef struct
 	int num_labels;
 	char *obj_labels[100];
 
+	const char *ascii_exclude;
+	unsigned char *ascii_exclude_set;
+
 	int bias; /* when saving incrementally to a file with garbage before the version marker */
 
 	int crypt_object_number;
@@ -618,6 +621,102 @@ static int is_bitmap_stream(fz_context *ctx, pdf_obj *obj, size_t len, int *w, i
 	}
 }
 
+static int pattern_match(const char *pattern, const char *string)
+{
+	while (*pattern && *string)
+	{
+		if (*pattern == '*')
+		{
+			pattern++;
+			if (!*pattern)
+				return 1;
+			while (*string)
+			{
+				if (pattern_match(pattern, string))
+					return 1;
+				string++;
+			}
+			return 0;
+		}
+		else if (*pattern == *string)
+		{
+			pattern++;
+			string++;
+		}
+		else
+		{
+			return 0;
+		}
+	}
+	return !*pattern && !*string;
+}
+
+typedef struct
+{
+	const char *pattern;
+	int matched;
+} label_check_ctx;
+
+static void check_label_callback(fz_context *ctx, void *arg, const char *label)
+{
+	label_check_ctx *lc = (label_check_ctx *)arg;
+	if (!lc->matched && pattern_match(lc->pattern, label))
+		lc->matched = 1;
+}
+
+static void build_ascii_exclusion_set(fz_context *ctx, pdf_document *doc, pdf_write_state *opts)
+{
+	char *patterns, *pattern, *next;
+	int i, n;
+
+	if (!opts->ascii_exclude || !*opts->ascii_exclude)
+		return;
+
+	if (!opts->labels)
+		opts->labels = pdf_load_object_labels(ctx, doc);
+
+	n = pdf_xref_len(ctx, doc);
+	opts->ascii_exclude_set = fz_calloc(ctx, n, sizeof(unsigned char));
+
+	patterns = fz_strdup(ctx, opts->ascii_exclude);
+
+	fz_try(ctx)
+	{
+		pattern = patterns;
+		while (pattern)
+		{
+			next = strchr(pattern, ',');
+			if (next)
+				*next++ = '\0';
+
+			while (*pattern == ' ' || *pattern == '\t')
+				pattern++;
+
+			if (*pattern)
+			{
+				for (i = 0; i < n; i++)
+				{
+					if (!opts->ascii_exclude_set[i])
+					{
+						label_check_ctx lc;
+						lc.pattern = pattern;
+						lc.matched = 0;
+						pdf_label_object(ctx, opts->labels, i, check_label_callback, &lc);
+						if (lc.matched)
+							opts->ascii_exclude_set[i] = 1;
+					}
+				}
+			}
+
+			pattern = next;
+		}
+	}
+	fz_always(ctx)
+		fz_free(ctx, patterns);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
+}
+
 static inline int isbinary(int c)
 {
 	if (c == '\n' || c == '\r' || c == '\t')
@@ -826,7 +925,7 @@ static void copystream(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 	pdf_obj *dp;
 	size_t len;
 	unsigned char *data;
-	int w, h;
+	int w, h, excluded;
 
 	fz_var(buf);
 	fz_var(tmp_comp);
@@ -875,7 +974,8 @@ static void copystream(fz_context *ctx, pdf_document *doc, pdf_write_state *opts
 			len = fz_buffer_storage(ctx, tmp_comp, &data);
 		}
 
-		if (opts->do_ascii && isbinarystream(ctx, data, len))
+		excluded = opts->ascii_exclude_set && num < opts->list_len && opts->ascii_exclude_set[num];
+		if (opts->do_ascii && isbinarystream(ctx, data, len) && !excluded)
 		{
 			tmp_hex = hexbuf(ctx, data, len);
 			len = fz_buffer_storage(ctx, tmp_hex, &data);
@@ -922,7 +1022,7 @@ static void expandstream(fz_context *ctx, pdf_document *doc, pdf_write_state *op
 	pdf_obj *dp;
 	size_t len;
 	unsigned char *data;
-	int w, h;
+	int w, h, excluded;
 
 	fz_var(buf);
 	fz_var(tmp_comp);
@@ -964,7 +1064,8 @@ static void expandstream(fz_context *ctx, pdf_document *doc, pdf_write_state *op
 			len = fz_buffer_storage(ctx, tmp_comp, &data);
 		}
 
-		if (opts->do_ascii && isbinarystream(ctx, data, len))
+		excluded = opts->ascii_exclude_set && num < opts->list_len && opts->ascii_exclude_set[num];
+		if (opts->do_ascii && isbinarystream(ctx, data, len) && !excluded)
 		{
 			tmp_hex = hexbuf(ctx, data, len);
 			len = fz_buffer_storage(ctx, tmp_hex, &data);
@@ -1184,8 +1285,9 @@ static void writeobject(fz_context *ctx, pdf_document *doc, pdf_write_state *opt
 			}
 			else
 			{
+				int ascii_override = opts->ascii_exclude_set && num < opts->list_len && opts->ascii_exclude_set[num];
 				fz_write_printf(ctx, opts->out, "%d %d obj\n", num, gen);
-				pdf_print_encrypted_obj(ctx, opts->out, obj, opts->do_tight, opts->do_ascii, unenc ? NULL : opts->crypt, num, gen, NULL);
+				pdf_print_encrypted_obj_ex(ctx, opts->out, obj, opts->do_tight, opts->do_ascii, unenc ? NULL : opts->crypt, num, gen, NULL, ascii_override);
 				fz_write_string(ctx, opts->out, "\nendobj\n\n");
 			}
 		}
@@ -1811,6 +1913,9 @@ static void initialise_write_state(fz_context *ctx, pdf_document *doc, const pdf
 	opts->gen_list = NULL;
 	opts->renumber_map = NULL;
 
+	opts->ascii_exclude = in_opts->ascii_exclude;
+	opts->ascii_exclude_set = NULL;
+
 	expand_lists(ctx, opts, xref_len);
 }
 
@@ -1821,6 +1926,7 @@ static void finalise_write_state(fz_context *ctx, pdf_write_state *opts)
 	fz_free(ctx, opts->ofs_list);
 	fz_free(ctx, opts->gen_list);
 	fz_free(ctx, opts->renumber_map);
+	fz_free(ctx, opts->ascii_exclude_set);
 	pdf_drop_object_labels(ctx, opts->labels);
 }
 
@@ -2466,6 +2572,9 @@ do_pdf_save_document(fz_context *ctx, pdf_document *doc, pdf_write_state *opts, 
 
 		if (in_opts->do_labels)
 			opts->labels = pdf_load_object_labels(ctx, doc);
+
+		if (in_opts->ascii_exclude && in_opts->do_ascii)
+			build_ascii_exclusion_set(ctx, doc, opts);
 
 		if (!opts->dont_regenerate_id)
 		{

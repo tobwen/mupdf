@@ -3221,6 +3221,7 @@ struct fmt
 	pdf_crypt *crypt;
 	int num;
 	int gen;
+	int ascii_override; /* Override ascii for this specific object */
 };
 
 static void fmt_obj(fz_context *ctx, struct fmt *fmt, pdf_obj *obj);
@@ -3621,11 +3622,12 @@ static void fmt_obj(fz_context *ctx, struct fmt *fmt, pdf_obj *obj)
 	else if (pdf_is_string(ctx, obj))
 	{
 		unsigned char *str = (unsigned char *)pdf_to_str_buf(ctx, obj);
+		int use_ascii = fmt->ascii && !fmt->ascii_override;
 		if (fmt->crypt
-			|| (fmt->ascii && is_binary_string(ctx, obj))
+			|| (use_ascii && is_binary_string(ctx, obj))
 			|| (str[0]==0xff && str[1]==0xfe)
 			|| (str[0]==0xfe && str[1] == 0xff)
-			|| is_longer_than_hex(ctx, obj)
+			|| (use_ascii && is_longer_than_hex(ctx, obj))
 			)
 			fmt_hex(ctx, fmt, obj);
 		else
@@ -3642,7 +3644,7 @@ static void fmt_obj(fz_context *ctx, struct fmt *fmt, pdf_obj *obj)
 }
 
 static char *
-pdf_sprint_encrypted_obj(fz_context *ctx, char *buf, size_t cap, size_t *len, pdf_obj *obj, int tight, int ascii, pdf_crypt *crypt, int num, int gen, int *sep)
+pdf_sprint_encrypted_obj_impl(fz_context *ctx, char *buf, size_t cap, size_t *len, pdf_obj *obj, int tight, int ascii, pdf_crypt *crypt, int num, int gen, int *sep, int ascii_override)
 {
 	struct fmt fmt;
 
@@ -3670,6 +3672,7 @@ pdf_sprint_encrypted_obj(fz_context *ctx, char *buf, size_t cap, size_t *len, pd
 	fmt.crypt = crypt;
 	fmt.num = num;
 	fmt.gen = gen;
+	fmt.ascii_override = ascii_override;
 
 	fz_try(ctx)
 	{
@@ -3687,6 +3690,12 @@ pdf_sprint_encrypted_obj(fz_context *ctx, char *buf, size_t cap, size_t *len, pd
 	}
 
 	return *len = fmt.len-1, fmt.ptr;
+}
+
+static char *
+pdf_sprint_encrypted_obj(fz_context *ctx, char *buf, size_t cap, size_t *len, pdf_obj *obj, int tight, int ascii, pdf_crypt *crypt, int num, int gen, int *sep)
+{
+	return pdf_sprint_encrypted_obj_impl(ctx, buf, cap, len, obj, tight, ascii, crypt, num, gen, sep, 0);
 }
 
 char *
@@ -3714,6 +3723,22 @@ void pdf_print_encrypted_obj(fz_context *ctx, fz_output *out, pdf_obj *obj, int 
 void pdf_print_obj(fz_context *ctx, fz_output *out, pdf_obj *obj, int tight, int ascii)
 {
 	pdf_print_encrypted_obj(ctx, out, obj, tight, ascii, NULL, 0, 0, NULL);
+}
+
+void pdf_print_encrypted_obj_ex(fz_context *ctx, fz_output *out, pdf_obj *obj, int tight, int ascii, pdf_crypt *crypt, int num, int gen, int *sep, int ascii_override)
+{
+	char buf[1024];
+	char *ptr;
+	size_t n;
+
+	ptr = pdf_sprint_encrypted_obj_impl(ctx, buf, sizeof buf, &n, obj, tight, ascii, crypt, num, gen, sep, ascii_override);
+	fz_try(ctx)
+		fz_write_data(ctx, out, ptr, n);
+	fz_always(ctx)
+		if (ptr != buf)
+			fz_free(ctx, ptr);
+	fz_catch(ctx)
+		fz_rethrow(ctx);
 }
 
 void pdf_debug_obj(fz_context *ctx, pdf_obj *obj)

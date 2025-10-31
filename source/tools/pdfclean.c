@@ -53,7 +53,7 @@ static int usage(void)
 		"\t-O -\towner password (only if encrypting)\n"
 		"\t-U -\tuser password (only if encrypting)\n"
 		"\t-P -\tpermission flags (only if encrypting)\n"
-		"\t-a\tascii hex encode binary streams\n"
+		"\t-a -\tascii hex encode binary streams (default: all, to exclude: '*/Contents,*/Metadata')\n"
 		"\t-d\tdecompress streams\n"
 		"\t-z\tdeflate uncompressed streams\n"
 		"\t-e -\tcompression \"effort\" (0 = default, 1 = min, 100 = max)\n"
@@ -134,7 +134,7 @@ int pdfclean_main(int argc, char **argv)
 	opts.write = pdf_default_write_options;
 	opts.write.dont_regenerate_id = 1;
 
-	while ((c = fz_getopt_long(argc, argv, "ade:fgilmp:stcvzDAE:LO:U:P:SZ", longopts)) != -1)
+	while ((c = fz_getopt_long(argc, argv, "a::de:fgilmp:stcvzDAE:LO:U:P:SZ", longopts)) != -1)
 	{
 		switch (c)
 		{
@@ -144,7 +144,14 @@ int pdfclean_main(int argc, char **argv)
 		case 'z': opts.write.do_compress += 1; break;
 		case 'f': opts.write.do_compress_fonts += 1; break;
 		case 'i': opts.write.do_compress_images += 1; break;
-		case 'a': opts.write.do_ascii += 1; break;
+		case 'a':
+			opts.write.do_ascii = 1;
+			if (fz_optarg && *fz_optarg)
+			{
+				opts.write.ascii_exclude = fz_optarg;
+				opts.write.do_labels = 1;
+			}
+			break;
 		case 'e': opts.write.compression_effort = fz_atoi(fz_optarg); break;
 		case 'g': opts.write.do_garbage += 1; break;
 		case 'l': opts.write.do_linear += 1; break;
